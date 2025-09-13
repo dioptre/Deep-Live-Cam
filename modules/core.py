@@ -49,6 +49,8 @@ def parse_args() -> None:
     program.add_argument('--live-resizable', help='The live camera frame is resizable', dest='live_resizable', action='store_true', default=False)
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int, default=suggest_max_memory())
     program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=['cpu'], choices=suggest_execution_providers(), nargs='+')
+
+    program.add_argument('--full-body', help='Enable real-time full-body swap (webcam)', dest='full_body', action='store_true', default=False)
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
     program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
 
@@ -252,6 +254,50 @@ def run() -> None:
         if not frame_processor.pre_check():
             return
     limit_resources()
+    # Real-time full-body swap mode
+    if getattr(modules.globals, 'full_body', False) and not modules.globals.headless:
+        from modules.processors.body_processor import BodyProcessor
+        import cv2
+        import numpy as np
+        execution_providers = modules.globals.execution_providers or ['CPUExecutionProvider']
+        body_processor = BodyProcessor(execution_provider=execution_providers[0])
+        source_img, source_keypoints = None, None
+        if modules.globals.source_path:
+            source_img = cv2.imread(modules.globals.source_path)
+            if source_img is None:
+                print(f"[ERROR] Source image not found: {modules.globals.source_path}")
+                return
+            source_keypoints, _ = body_processor.estimate_pose(source_img)
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("[ERROR] Cannot open camera")
+            return
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if source_keypoints is not None:
+                person_boxes = body_processor.detect_persons(frame)
+                for box in person_boxes:
+                    x1, y1, w, h = map(int, box)
+                    if x1 < 0 or y1 < 0 or x1+w > frame.shape[1] or y1+h > frame.shape[0]:
+                        continue
+                    body_region = frame[y1:y1+h, x1:x1+w]
+                    target_keypoints, _ = body_processor.estimate_pose(body_region)
+                    if target_keypoints is None:
+                        continue
+                    seg_mask = body_processor.segment_body(body_region)
+                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints)
+                    mask_inv = 1 - seg_mask
+                    blended = (warped_source * seg_mask[..., np.newaxis] + body_region * mask_inv[..., np.newaxis]).astype(np.uint8)
+                    frame[y1:y1+h, x1:x1+w] = blended
+            cv2.imshow('Deep Live Cam - Full Body', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+        return
+    # Default: run normal pipeline
     if modules.globals.headless:
         start()
     else:

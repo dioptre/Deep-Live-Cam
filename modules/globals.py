@@ -37,6 +37,7 @@ camera_input_combobox = None
 webcam_preview_running = False
 show_fps = False
 mouth_mask = False
+full_body = False
 show_mouth_mask_box = False
 mask_feather_ratio = 8
 mask_down_size = 0.50
