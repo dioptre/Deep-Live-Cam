@@ -79,35 +79,113 @@ class BodyProcessor:
         mask = output[:, :, 3] / 255.0 if output.shape[2] == 4 else np.zeros((frame.shape[0], frame.shape[1]))
         return mask
 
-    def warp_body(self, source_img, source_keypoints, target_keypoints, target_shape):
-        if source_keypoints is None or target_keypoints is None:
-            return source_img
+    def get_body_part_keypoints(self):
+        """Define keypoint groups for different body parts (excluding head)"""
+        return {
+            'torso': [11, 12, 23, 24],  # shoulders and hips
+            'left_arm': [11, 13, 15],   # left shoulder, elbow, wrist
+            'right_arm': [12, 14, 16],  # right shoulder, elbow, wrist
+            'left_leg': [23, 25, 27],   # left hip, knee, ankle
+            'right_leg': [24, 26, 28],  # right hip, knee, ankle
+        }
+    
+    def create_body_part_mask(self, keypoints, part_name, image_shape):
+        """Create a mask for a specific body part"""
+        h, w = image_shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        part_keypoints = self.get_body_part_keypoints()[part_name]
+        
+        # Convert normalized keypoints to pixel coordinates
+        points = []
+        for idx in part_keypoints:
+            if keypoints[idx][2] > 0.5:  # visibility threshold
+                x = int(keypoints[idx][0] * w)
+                y = int(keypoints[idx][1] * h)
+                points.append([x, y])
+        
+        if len(points) >= 3:
+            # Create a convex hull around the keypoints
+            points = np.array(points)
+            hull = cv2.convexHull(points)
             
-        # Key body points: shoulders (11,12), hips (23,24)
-        # Convert normalized keypoints to pixel coordinates for both source and target
+            # Expand the hull slightly
+            center = np.mean(hull, axis=0).astype(int)
+            expanded_hull = []
+            for point in hull:
+                direction = point - center
+                expanded_point = center + direction * 1.3  # Expand by 30%
+                expanded_hull.append(expanded_point.astype(int))
+            
+            expanded_hull = np.array(expanded_hull)
+            cv2.fillPoly(mask, [expanded_hull], 255)
+        
+        return mask / 255.0  # Normalize to 0-1
+    
+    def warp_body_part(self, source_img, source_keypoints, target_keypoints, part_name, target_shape):
+        """Warp a specific body part"""
+        if source_keypoints is None or target_keypoints is None:
+            return cv2.resize(source_img, (target_shape[1], target_shape[0]))
+            
+        part_keypoint_indices = self.get_body_part_keypoints()[part_name]
+        
+        # Convert normalized keypoints to pixel coordinates
         src_h, src_w = source_img.shape[:2]
         tgt_h, tgt_w = target_shape[:2]
         
-        src_pts = np.array([
-            [source_keypoints[i][0] * src_w, source_keypoints[i][1] * src_h] 
-            for i in [11,12,23,24]
-        ], dtype=np.float32)
+        src_pts = []
+        tgt_pts = []
         
-        tgt_pts = np.array([
-            [target_keypoints[i][0] * tgt_w, target_keypoints[i][1] * tgt_h] 
-            for i in [11,12,23,24]
-        ], dtype=np.float32)
+        for idx in part_keypoint_indices:
+            if (source_keypoints[idx][2] > 0.5 and target_keypoints[idx][2] > 0.5):
+                src_pts.append([source_keypoints[idx][0] * src_w, source_keypoints[idx][1] * src_h])
+                tgt_pts.append([target_keypoints[idx][0] * tgt_w, target_keypoints[idx][1] * tgt_h])
         
-        # Check if we have valid points (not all zeros/NaN)
-        if np.any(np.isnan(src_pts)) or np.any(np.isnan(tgt_pts)):
-            return cv2.resize(source_img, (tgt_w, tgt_h))  # Fallback: just resize
-            
+        if len(src_pts) < 2:
+            return cv2.resize(source_img, (tgt_w, tgt_h))
+        
+        src_pts = np.array(src_pts, dtype=np.float32)
+        tgt_pts = np.array(tgt_pts, dtype=np.float32)
+        
         try:
-            M, _ = cv2.estimateAffinePartial2D(src_pts, tgt_pts)
+            if len(src_pts) >= 3:
+                M, _ = cv2.estimateAffinePartial2D(src_pts, tgt_pts)
+            else:
+                # For 2 points, use similarity transform
+                angle = np.arctan2(tgt_pts[1][1] - tgt_pts[0][1], tgt_pts[1][0] - tgt_pts[0][0]) - \
+                       np.arctan2(src_pts[1][1] - src_pts[0][1], src_pts[1][0] - src_pts[0][0])
+                scale = np.linalg.norm(tgt_pts[1] - tgt_pts[0]) / np.linalg.norm(src_pts[1] - src_pts[0])
+                
+                cos_a, sin_a = np.cos(angle) * scale, np.sin(angle) * scale
+                M = np.array([[cos_a, -sin_a, tgt_pts[0][0] - (cos_a * src_pts[0][0] - sin_a * src_pts[0][1])],
+                             [sin_a, cos_a, tgt_pts[0][1] - (sin_a * src_pts[0][0] + cos_a * src_pts[0][1])]], dtype=np.float32)
+            
             if M is not None:
                 warped = cv2.warpAffine(source_img, M, (tgt_w, tgt_h))
                 return warped
         except Exception as e:
-            print(f"[WARN] Body warping failed: {e}")
+            print(f"[WARN] Body part {part_name} warping failed: {e}")
             
-        return cv2.resize(source_img, (tgt_w, tgt_h))  # Fallback: just resize
+        return cv2.resize(source_img, (tgt_w, tgt_h))
+    
+    def process_body_parts(self, source_img, source_keypoints, target_frame, target_keypoints):
+        """Process all body parts separately (excluding head)"""
+        if source_keypoints is None or target_keypoints is None:
+            return target_frame
+        
+        result = target_frame.copy()
+        body_parts = self.get_body_part_keypoints()
+        
+        for part_name in body_parts.keys():
+            # Create mask for this body part in target frame
+            part_mask = self.create_body_part_mask(target_keypoints, part_name, target_frame.shape)
+            
+            if np.sum(part_mask) > 100:  # Only process if mask is substantial
+                # Warp the source body part to match target
+                warped_part = self.warp_body_part(source_img, source_keypoints, target_keypoints, part_name, target_frame.shape)
+                
+                # Blend the warped part into the result
+                part_mask_3d = part_mask[..., np.newaxis]
+                result = (warped_part * part_mask_3d + result * (1 - part_mask_3d)).astype(np.uint8)
+        
+        return result

@@ -418,22 +418,28 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
             else:
                 temp_frame = fit_image_to_size(temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height())
             
-            # Full-body processing
+            # Combined face + body processing
+            # First: Apply original face swapping for the head
+            from modules.face_analyser import get_one_face
+            from modules.processors.frame.core import get_frame_processors_modules
+            
+            source_face = None
+            if modules.globals.source_path:
+                source_face = get_one_face(cv2.imread(modules.globals.source_path))
+            
+            if source_face is not None:
+                # Apply face swapping using the original processors
+                frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
+                for frame_processor in frame_processors:
+                    if frame_processor.NAME != "DLC.FACE-ENHANCER":
+                        temp_frame = frame_processor.process_frame(source_face, temp_frame)
+            
+            # Second: Apply body part processing for non-head areas
             if source_keypoints is not None:
-                person_boxes = body_processor.detect_persons(temp_frame)
-                for box in person_boxes:
-                    x1, y1, w, h = map(int, box)
-                    if x1 < 0 or y1 < 0 or x1+w > temp_frame.shape[1] or y1+h > temp_frame.shape[0]:
-                        continue
-                    body_region = temp_frame[y1:y1+h, x1:x1+w]
-                    target_keypoints, _ = body_processor.estimate_pose(body_region)
-                    if target_keypoints is None:
-                        continue
-                    seg_mask = body_processor.segment_body(body_region)
-                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints, body_region.shape)
-                    mask_inv = 1 - seg_mask
-                    blended = (warped_source * seg_mask[..., np.newaxis] + body_region * mask_inv[..., np.newaxis]).astype(np.uint8)
-                    temp_frame[y1:y1+h, x1:x1+w] = blended
+                target_keypoints, _ = body_processor.estimate_pose(temp_frame)
+                if target_keypoints is not None:
+                    # Process body parts (excluding head) with per-part warping
+                    temp_frame = body_processor.process_body_parts(source_img, source_keypoints, temp_frame, target_keypoints)
             
             # Calculate and display FPS
             current_time = time.time()

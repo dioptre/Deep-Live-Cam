@@ -281,21 +281,26 @@ def run() -> None:
             ret, frame = cap.read()
             if not ret:
                 break
+            # Combined face + body processing
+            # First: Apply original face swapping for the head
+            from modules.face_analyser import get_one_face
+            
+            source_face = None
+            if modules.globals.source_path:
+                source_face = get_one_face(cv2.imread(modules.globals.source_path))
+            
+            if source_face is not None:
+                # Apply face swapping using the original processors
+                for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
+                    if frame_processor.NAME != "DLC.FACE-ENHANCER":
+                        frame = frame_processor.process_frame(source_face, frame)
+            
+            # Second: Apply body part processing for non-head areas
             if source_keypoints is not None:
-                person_boxes = body_processor.detect_persons(frame)
-                for box in person_boxes:
-                    x1, y1, w, h = map(int, box)
-                    if x1 < 0 or y1 < 0 or x1+w > frame.shape[1] or y1+h > frame.shape[0]:
-                        continue
-                    body_region = frame[y1:y1+h, x1:x1+w]
-                    target_keypoints, _ = body_processor.estimate_pose(body_region)
-                    if target_keypoints is None:
-                        continue
-                    seg_mask = body_processor.segment_body(body_region)
-                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints, body_region.shape)
-                    mask_inv = 1 - seg_mask
-                    blended = (warped_source * seg_mask[..., np.newaxis] + body_region * mask_inv[..., np.newaxis]).astype(np.uint8)
-                    frame[y1:y1+h, x1:x1+w] = blended
+                target_keypoints, _ = body_processor.estimate_pose(frame)
+                if target_keypoints is not None:
+                    # Process body parts (excluding head) with per-part warping
+                    frame = body_processor.process_body_parts(source_img, source_keypoints, frame, target_keypoints)
             cv2.imshow('Deep Live Cam - Full Body', frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
