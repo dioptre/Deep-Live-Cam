@@ -365,6 +365,114 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     live_button.place(relx=0.65, rely=0.86, relwidth=0.2, relheight=0.05)
     # --- End Camera Selection ---
 
+    def start_live_body():
+        """Start full-body live preview mode"""
+        modules.globals.full_body = True
+        available_cameras = get_available_cameras()
+        camera_indices, camera_names = available_cameras
+        if not camera_names or camera_names[0] == "No cameras found":
+            update_status("No cameras found for full-body live preview.")
+            return
+        camera_index = camera_indices[camera_names.index(camera_names[0])]
+        create_full_body_preview(camera_index)
+
+    def create_full_body_preview(camera_index: int):
+        """Create full-body preview window"""
+        global preview_label, PREVIEW
+        from modules.processors.body_processor import BodyProcessor
+        import cv2
+        import numpy as np
+        
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            update_status("Failed to start camera for full-body preview")
+            return
+        
+        preview_label.configure(width=PREVIEW_DEFAULT_WIDTH, height=PREVIEW_DEFAULT_HEIGHT)
+        PREVIEW.deiconify()
+        execution_providers = modules.globals.execution_providers or ['CPUExecutionProvider']
+        body_processor = BodyProcessor(execution_provider=execution_providers[0])
+        
+        source_img, source_keypoints = None, None
+        if modules.globals.source_path:
+            source_img = cv2.imread(modules.globals.source_path)
+            if source_img is not None:
+                source_keypoints, _ = body_processor.estimate_pose(source_img)
+        
+        prev_time = time.time()
+        fps_update_interval = 0.5
+        frame_count = 0
+        fps = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            temp_frame = frame.copy()
+            if modules.globals.live_mirror:
+                temp_frame = cv2.flip(temp_frame, 1)
+                
+            if modules.globals.live_resizable:
+                temp_frame = fit_image_to_size(temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height())
+            else:
+                temp_frame = fit_image_to_size(temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height())
+            
+            # Full-body processing
+            if source_keypoints is not None:
+                person_boxes = body_processor.detect_persons(temp_frame)
+                for box in person_boxes:
+                    x1, y1, w, h = map(int, box)
+                    if x1 < 0 or y1 < 0 or x1+w > temp_frame.shape[1] or y1+h > temp_frame.shape[0]:
+                        continue
+                    body_region = temp_frame[y1:y1+h, x1:x1+w]
+                    target_keypoints, _ = body_processor.estimate_pose(body_region)
+                    if target_keypoints is None:
+                        continue
+                    seg_mask = body_processor.segment_body(body_region)
+                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints, body_region.shape)
+                    mask_inv = 1 - seg_mask
+                    blended = (warped_source * seg_mask[..., np.newaxis] + body_region * mask_inv[..., np.newaxis]).astype(np.uint8)
+                    temp_frame[y1:y1+h, x1:x1+w] = blended
+            
+            # Calculate and display FPS
+            current_time = time.time()
+            frame_count += 1
+            if current_time - prev_time >= fps_update_interval:
+                fps = frame_count / (current_time - prev_time)
+                frame_count = 0
+                prev_time = current_time
+                
+            if modules.globals.show_fps:
+                cv2.putText(
+                    temp_frame,
+                    f"FPS: {fps:.1f}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    2,
+                )
+                
+            image = cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(image)
+            image = ImageOps.contain(image, (temp_frame.shape[1], temp_frame.shape[0]), Image.LANCZOS)
+            image = ctk.CTkImage(image, size=image.size)
+            preview_label.configure(image=image)
+            ROOT.update()
+            
+            if PREVIEW.state() == "withdrawn":
+                break
+                
+        cap.release()
+        PREVIEW.withdraw()
+
+    # Add Live Body button
+    live_body_button = ctk.CTkButton(
+        root, text="Live Body", cursor="hand2", command=start_live_body
+    )
+    live_body_button.place(relx=0.1, rely=0.85, relwidth=0.2, relheight=0.05)
+
     status_label = ctk.CTkLabel(root, text=None, justify="center")
     status_label.place(relx=0.1, rely=0.9, relwidth=0.8)
 

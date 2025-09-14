@@ -1,4 +1,16 @@
+## SCRFD Person Detection Model
+
+For full-body/person detection, download the SCRFD ONNX model from HuggingFace:
+
+https://huggingface.co/crj/dl-ws/blob/8f8ec345154a161633d8294fd5e21908c97d7f8a/scrfd_2.5g.onnx
+
+Place the downloaded file in the `models/` directory as `models/scrfd_2.5g.onnx` (or update the path in your code/config).
 <h1 align="center">Deep-Live-Cam</h1>
+
+For a mac:
+```sh
+uv run python run.py --full-body --execution-provider coreml
+```
 
 <p align="center">
   Real-time face swap and video deepfake with a single click and only a single image.

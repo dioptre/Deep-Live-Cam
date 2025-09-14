@@ -82,6 +82,11 @@ def parse_args() -> None:
     modules.globals.execution_providers = decode_execution_providers(args.execution_provider)
     modules.globals.execution_threads = args.execution_threads
     modules.globals.lang = args.lang
+    modules.globals.full_body = getattr(args, 'full_body', False)
+    
+    # Force headless mode when using full-body to avoid UI issues
+    if args.full_body:
+        modules.globals.headless = True
 
     #for ENHANCER tumbler:
     if 'face_enhancer' in args.frame_processor:
@@ -254,8 +259,8 @@ def run() -> None:
         if not frame_processor.pre_check():
             return
     limit_resources()
-    # Real-time full-body swap mode
-    if getattr(modules.globals, 'full_body', False) and not modules.globals.headless:
+    # Real-time full-body swap mode (works in headless mode too)
+    if getattr(modules.globals, 'full_body', False):
         from modules.processors.body_processor import BodyProcessor
         import cv2
         import numpy as np
@@ -287,7 +292,7 @@ def run() -> None:
                     if target_keypoints is None:
                         continue
                     seg_mask = body_processor.segment_body(body_region)
-                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints)
+                    warped_source = body_processor.warp_body(source_img, source_keypoints, target_keypoints, body_region.shape)
                     mask_inv = 1 - seg_mask
                     blended = (warped_source * seg_mask[..., np.newaxis] + body_region * mask_inv[..., np.newaxis]).astype(np.uint8)
                     frame[y1:y1+h, x1:x1+w] = blended
@@ -301,5 +306,15 @@ def run() -> None:
     if modules.globals.headless:
         start()
     else:
-        window = ui.init(start, destroy, modules.globals.lang)
+        try:
+            window = ui.init(start, destroy, modules.globals.lang)
+        except Exception as e:
+            print(f"[ERROR] UI initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Exiting due to UI initialization failure.")
+            return
+        if window is None:
+            print("[ERROR] UI failed to initialize (ui.init returned None). Exiting.")
+            return
         window.mainloop()
